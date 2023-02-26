@@ -17,7 +17,7 @@ def main():
 
     with NWBHDF5IO(nwb_filenames[0], "r") as io:
         read_nwbfile = io.read()
-        print(read_nwbfile.acq)
+        print(read_nwbfile)
 
 
 if __name__ == "__main__":
