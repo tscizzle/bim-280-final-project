@@ -1,6 +1,9 @@
+import time
 import math
 from datetime import timedelta
 import bisect
+
+import numpy as np
 
 
 def display_secs_as_time(secs):
@@ -29,78 +32,207 @@ def polar_coords(x, y):
 
     :return (r, theta):
     """
-    r = math.sqrt(x ** 2 + y ** 2)
+    r = math.sqrt(x**2 + y**2)
     theta = math.atan2(y, x)
     return r, theta
 
 
-def create_relative_response_matrix(data, event_name, bin_size):
+def get_event_timeline(nwbfile):
     """
-    Create a relative response matrix.
+    Make a list of all trial-related events, like go cue, hitting the target, etc.
+    sorted by time.
 
-    Axis 0 is trial, so the length is the number of trials for the given event. Axis 1
-    is binned spike counts for all neurons, so the length is the number of neurons times
-    the number of bins in our response window.
+    :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
 
-    Each value is how many spikes a certain neuron had within that time bin relative to
-    the trial start. So for a given trial (row), if there are 20 bins (say, window of
-    200ms and bins of 10ms), columns 0-19 are the first neuron's bins, 20-39 are the
-    next neuron's bins, etc. The order of neurons is sorted alphabetically by name.
+    :return dict[]: Each dict in the list has fields "timestamp" and "field". The
+        timestamp is seconds into the session, and the field is one of "start_time",
+        "go_cue_time", etc. as they appear in the trials structure of the nwb file.
+    """
+    time_fields = [
+        "start_time",
+        "stop_time",
+        "fail_time",
+        "go_cue_time",
+        "reach_time",
+        "target_hold_time",
+        "target_held_time",
+        "target_shown_time",
+        "target_acquire_time",
+    ]
 
-    :param dict data: Dictionary loaded from the input JSON, with "events" and "neurons"
-        fields saying the timing of the events and when the neurons spiked.
-    :param string event_name: Name of the event we are getting the neural response for.
-        This will be a key in the data's "events" dict.
-    :param float bin_size: In seconds, time width of each bin within which to count
-        spikes.
+    all_events = []
+    for field in time_fields:
+        for val in nwbfile.trials[field]:
+            timestamps = val if isinstance(val, np.ndarray) else [val]
+            for t in timestamps:
+                if not np.isnan(t):
+                    all_events.append(
+                        {
+                            "timestamp": t,
+                            "field": field,
+                        }
+                    )
 
-    :return np.ndarray relative_response_matrix: Matrix with dimensions
-        num_trials x (num_bins * num_neurons)
+    sorted_events = sorted(all_events, key=lambda d: d["timestamp"])
+
+    return sorted_events
+
+
+def get_binned_firing_rates(nwbfile, bin_size):
+    """
+    Make a matrix of all time bins in the session, counting how many spikes each channel
+    has within each bin, and scaling to represent firing rate in spikes per second.
+
+    :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
+    :param float bin_size: Length (in seconds) of each time bin.
+
+    :return np.ndarray binned_firing_rates: Matrix with dimensions
+        (num_bins x num_channels)
+    """
+    # Each element is a channel's spiking activity, in the form of a list of times
+    # (in seconds from session start) that spikes occurred.
+    spike_times_by_channel = nwbfile.units["spike_times"][:]
+
+    # Get the dimensions of the binned spike counts matrix.
+    num_channels = len(spike_times_by_channel)
+    latest_spike_time = max(t for l in spike_times_by_channel for t in l)
+    num_bins = math.ceil(latest_spike_time / bin_size)
+
+    # Initialize the binned spike counts as 0.
+    binned_spike_counts = np.zeros((num_bins, num_channels))
+
+    # Iterate over all spikes in all channels and add each one to the appropriate bin.
+    for channel_idx, spike_times in enumerate(spike_times_by_channel):
+        for spike_time in spike_times:
+            bin_idx = math.floor(spike_time / bin_size)
+            binned_spike_counts[bin_idx, channel_idx] += 1
+
+    binned_firing_rates = binned_spike_counts / bin_size
+
+    return binned_firing_rates
+
+
+def get_binned_intended_velocities(nwbfile, bin_size):
+    """
+    Make a matrix of all time bins in the session, calculating the average vector from
+    hand position to target within each bin.
+
+    :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
+    :param float bin_size: Length (in seconds) of each time bin.
+
+    :return np.ndarray binned_intended_velocities: Matrix with dimensions (num_bins x 2)
+    """
+    hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
+    hand_position_timestamps = hand_positions.timestamps
+    hand_position_vectors = hand_positions.data
+    trial_target_positions = nwbfile.trials["target_pos"]
+    trial_go_cue_times = nwbfile.trials["go_cue_time"]
+    trial_stop_times = nwbfile.trials["stop_time"]
+
+    latest_trial_stop = trial_stop_times[-1]
+    num_bins = math.ceil(latest_trial_stop / bin_size)
+
+    binned_intended_velocities = np.empty((num_bins, 2))
+    binned_intended_velocities.fill(np.nan)
+
+    cur_trial_idx = 0
+    cur_behavior_idx = 0
+    for bin_idx in range(num_bins):
+        bin_start = bin_idx * bin_size
+        bin_end = (bin_idx + 1) * bin_size
+        bin_midpoint = (bin_end + bin_start) / 2
+
+        # Get all the hand positions in this time bin.
+        bin_hand_positions = []
+        while (
+            cur_behavior_idx < len(hand_position_timestamps)
+            and hand_position_timestamps[cur_behavior_idx] < bin_end
+        ):
+            if hand_position_timestamps[cur_behavior_idx] >= bin_start:
+                bin_hand_positions.append(hand_position_vectors[cur_behavior_idx])
+            cur_behavior_idx += 1
+        # If there are no hand positions given in this time bin, skip this bin.
+        if len(bin_hand_positions) == 0:
+            continue
+        # Get the average hand position in this time bin.
+        bin_hand_positions = np.array(bin_hand_positions)
+        bin_avg_hand_position = np.mean(bin_hand_positions, axis=0)
+
+        # Get the target position in this time bin. (Use the midpoint of the bin, so we
+        # only use a target if it was active for more than half the bin.)
+        bin_target_position = None
+        while (
+            cur_trial_idx < len(trial_stop_times)
+            and trial_stop_times[cur_trial_idx] < bin_start
+        ):
+            cur_trial_idx += 1
+        trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
+        trial_stop_time = trial_stop_times[cur_trial_idx]
+        if trial_go_cue_time < bin_midpoint < trial_stop_time:
+            bin_target_position = trial_target_positions[cur_trial_idx]
+
+        if bin_target_position is not None:
+            # Assume intended velocity is the vector from the hand to the target.
+            bin_intended_velocity = bin_target_position - bin_avg_hand_position
+            # Take just x and y. No z.
+            bin_intended_velocity = bin_intended_velocity[:2]
+
+            binned_intended_velocities[bin_idx] = bin_intended_velocity
+
+    return binned_intended_velocities
+
+
+def get_behavior_idxs_by_trial_idx(nwbfile):
+    """
+    Get the indices in the behavior data that map to each trial.
+
+    :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
+
+    :return dict behavior_idxs_by_trial_idx: Keys are trial idx. Values are dicts with
+        keys "start_idx" and "stop_idx" which are the indices in the behavior array that
+        correspond to the start and stop timestamps for that trial.
     """
 
-    num_trials = len(data["events"][event_name])
-    num_neurons = len(data["neurons"])
-    num_bins = int((RESPONSE_END - RESPONSE_START) / bin_size)
+    behavior_idxs_by_trial_idx = {}
 
-    relative_response_matrix = np.zeros((num_trials, num_neurons * num_bins), dtype=int)
+    # Loop through trials and behavior stream in parallel, accruing the mapping from
+    # trial start times to indices of the behavior stream.
+    trial_start_times = nwbfile.trials["start_time"]
+    trial_go_cue_times = nwbfile.trials["go_cue_time"]
+    trial_stop_times = nwbfile.trials["stop_time"]
+    hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
+    behavior_timestamps = hand_positions.timestamps
+    num_trials = len(trial_start_times)
+    num_behavior_idxs = len(behavior_timestamps)
+    cur_trial_idx = 0
+    cur_behavior_idx = 0
+    while cur_trial_idx < num_trials:
+        trial_start_time = trial_start_times[cur_trial_idx]
+        trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
+        trial_stop_time = trial_stop_times[cur_trial_idx]
+        start_idx = None
+        stop_idx = None
 
-    # For each trial of this event...
-    for row_idx, event_time in enumerate(data["events"][event_name]):
+        while cur_behavior_idx < num_behavior_idxs:
+            behavior_timestamp = behavior_timestamps[cur_behavior_idx]
+            if behavior_timestamp == trial_start_time:
+                start_idx = cur_behavior_idx
+            elif behavior_timestamp == trial_go_cue_time:
+                go_cue_idx = behavior_timestamp
+            elif behavior_timestamp == trial_stop_time:
+                stop_idx = cur_behavior_idx
 
-        # For each neuron...
-        for neuron_idx, spike_times in enumerate(sorted(data["neurons"].values())):
+            cur_behavior_idx += 1
 
-            # Since all neurons' bins are horizontally conctenated in each trial's row,
-            # appropriately offset this neuron's bins. (i.e. If there's 20 bins, for the
-            # first neuron use indices 0-19, for the next neuron use indices 20-39, ...)
-            neuron_column_offset = neuron_idx * num_bins
+            if stop_idx is not None:
+                break
 
-            # Get when this trial started, since spikes will be counted in time bins
-            # relative to that.
-            window_start = event_time + RESPONSE_START
-            window_end = event_time + RESPONSE_END
+        behavior_idxs_by_trial_idx[cur_trial_idx] = {
+            "start_idx": start_idx,
+            "go_cue_idx": go_cue_idx,
+            "stop_idx": stop_idx,
+        }
 
-            # Find the first and last spike time within the response time range.
-            # (Instead of iterating through all the spike times in linear time, we can
-            # in log time first filter to the relevant small range of spike times.)
-            first_spike_idx = bisect.bisect_left(spike_times, window_start)
-            last_spike_idx = bisect.bisect_right(spike_times, window_end)
+        cur_trial_idx += 1
 
-            # For each neuron spike...
-            for spike_time in spike_times[first_spike_idx:last_spike_idx]:
-
-                # Calculate the bin this spike belongs in relative to the beginning of
-                # the window for this specific trial.
-                bin_idx = math.floor((spike_time - window_start) / bin_size)
-
-                # If the bin falls within our response window...
-                if 0 <= bin_idx < num_bins:
-
-                    # Get the column to add this spike to, given the neuron's offset in
-                    # the row as well as the bin this spike falls in.
-                    col_idx = neuron_column_offset + bin_idx
-
-                    # Increment the running spike count for the calculated spot.
-                    relative_response_matrix[row_idx, col_idx] += 1
-
-    return relative_response_matrix
+    return behavior_idxs_by_trial_idx
