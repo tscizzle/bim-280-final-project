@@ -1,9 +1,53 @@
+import os
 import time
 import math
 from datetime import timedelta
 import bisect
 
 import numpy as np
+from sklearn.linear_model import LinearRegression
+from filterpy.kalman import KalmanFilter
+
+
+CACHE_DIR = "cache"
+
+
+def cached_func(cache_filename, func):
+    """
+    Run a function which generates a numpy serializable object. However, first check if
+    the cached result exists, in which case don't run the function again, and instead
+    just load from the cached file. If the cache does not exist, do run the function,
+    and also save the result as a cache file.
+
+    :param str cache_filename: E.g. Name of the cache file to load from or save to,
+        preferably with the .npy file extension to make it clear what it is, e.g.
+        "binned_firing_rates.npy"
+    :param function func: Function (of no arguments) to run, which generates the object
+        we want. If the function you want to run takes arguments, you can simply define
+        a lambda function in-line, like `lambda: my_func(arg1, arg2)`, to make an
+        equivalent function that takes no arguments.
+
+    :return result: Numpy savable/loadable object, e.g. a numpy.ndarray.
+    """
+    cache_filepath = os.path.join(CACHE_DIR, cache_filename)
+
+    # If cache file exists, just load from that.
+    if os.path.exists(cache_filepath):
+        with open(cache_filepath, "rb") as f:
+            result = np.load(f)
+            print(f"\nLoaded {cache_filename} from cache.\n")
+    else:
+        # Otherwise, calculate the binned intended velocities.
+        print(f"\nCalculating {cache_filename}...\n")
+        result = func()
+        # And cache them for future runs.
+        if not os.path.exists(CACHE_DIR):
+            os.makedirs(CACHE_DIR)
+        with open(cache_filepath, "wb") as f:
+            np.save(f, result)
+        print(f"Calculated {cache_filename}.")
+
+    return result
 
 
 def display_secs_as_time(secs):
@@ -86,7 +130,7 @@ def get_binned_firing_rates(nwbfile, bin_size):
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
     :param float bin_size: Length (in seconds) of each time bin.
 
-    :return np.ndarray binned_firing_rates: Matrix with dimensions
+    :return numpy.ndarray binned_firing_rates: Matrix with dimensions
         (num_bins x num_channels)
     """
     # Each element is a channel's spiking activity, in the form of a list of times
@@ -120,7 +164,7 @@ def get_binned_intended_velocities(nwbfile, bin_size):
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
     :param float bin_size: Length (in seconds) of each time bin.
 
-    :return np.ndarray binned_intended_velocities: Matrix with dimensions (num_bins x 2)
+    :return numpy.ndarray binned_intended_velocities: Matrix with dimensions (num_bins x 2)
     """
     hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
     hand_position_timestamps = hand_positions.timestamps
@@ -168,6 +212,7 @@ def get_binned_intended_velocities(nwbfile, bin_size):
             cur_trial_idx += 1
         trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
         trial_stop_time = trial_stop_times[cur_trial_idx]
+        # Only consider the target active if we are between a go cue and the trial stop.
         if trial_go_cue_time < bin_midpoint < trial_stop_time:
             bin_target_position = trial_target_positions[cur_trial_idx]
 
@@ -188,29 +233,36 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
 
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
 
-    :return dict behavior_idxs_by_trial_idx: Keys are trial idx. Values are dicts with
-        keys "start_idx" and "stop_idx" which are the indices in the behavior array that
-        correspond to the start and stop timestamps for that trial.
+    :return dict behavior_idxs_by_trial_idx: Axis 0 is trial idx. Values in each column
+        are the indices into the behavior array that correspond to certain timestamps
+        for that trial.
+        - Column 0 is start_idx.
+        - Column 1 is go_cue_idx.
+        - Column 2 is stop_idx.
     """
+    trial_start_times = nwbfile.trials["start_time"]
+    num_trials = len(trial_start_times)
 
-    behavior_idxs_by_trial_idx = {}
+    behavior_idxs_by_trial_idx = np.empty((num_trials, 3), dtype=int)
+    behavior_idxs_by_trial_idx.fill(np.nan)
+    start_idx_col = 0
+    go_cue_idx_col = 1
+    stop_idx_col = 2
 
     # Loop through trials and behavior stream in parallel, accruing the mapping from
     # trial start times to indices of the behavior stream.
-    trial_start_times = nwbfile.trials["start_time"]
     trial_go_cue_times = nwbfile.trials["go_cue_time"]
     trial_stop_times = nwbfile.trials["stop_time"]
     hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
     behavior_timestamps = hand_positions.timestamps
-    num_trials = len(trial_start_times)
     num_behavior_idxs = len(behavior_timestamps)
-    cur_trial_idx = 0
     cur_behavior_idx = 0
-    while cur_trial_idx < num_trials:
-        trial_start_time = trial_start_times[cur_trial_idx]
-        trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
-        trial_stop_time = trial_stop_times[cur_trial_idx]
+    for trial_idx in range(num_trials):
+        trial_start_time = trial_start_times[trial_idx]
+        trial_go_cue_time = trial_go_cue_times[trial_idx]
+        trial_stop_time = trial_stop_times[trial_idx]
         start_idx = None
+        go_cue_idx = None
         stop_idx = None
 
         while cur_behavior_idx < num_behavior_idxs:
@@ -218,7 +270,7 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
             if behavior_timestamp == trial_start_time:
                 start_idx = cur_behavior_idx
             elif behavior_timestamp == trial_go_cue_time:
-                go_cue_idx = behavior_timestamp
+                go_cue_idx = cur_behavior_idx
             elif behavior_timestamp == trial_stop_time:
                 stop_idx = cur_behavior_idx
 
@@ -227,12 +279,120 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
             if stop_idx is not None:
                 break
 
-        behavior_idxs_by_trial_idx[cur_trial_idx] = {
-            "start_idx": start_idx,
-            "go_cue_idx": go_cue_idx,
-            "stop_idx": stop_idx,
-        }
-
-        cur_trial_idx += 1
+        # Take the important timestamps for this trial, and store their behavior indices
+        # in the row for this trial (each in the specified column).
+        behavior_idxs_by_trial_idx[trial_idx][start_idx_col] = start_idx
+        if go_cue_idx is not None:
+            behavior_idxs_by_trial_idx[trial_idx][go_cue_idx_col] = go_cue_idx
+        behavior_idxs_by_trial_idx[trial_idx][stop_idx_col] = stop_idx
 
     return behavior_idxs_by_trial_idx
+
+
+def get_kalman_model(binned_firing_rates, binned_intended_velocities):
+    """
+    Not doc'ing this since I'm not using it.
+    """
+
+    # Constant term to account for baseline firing rates, v_x, v_y.
+    state_dimension = 3
+    # Measurements from two 96-channel electrode arrays.
+    measurement_dimension = 192
+
+    kalman_model = KalmanFilter(dim_x=state_dimension, dim_z=measurement_dimension)
+
+    # Calculate measurement matrix (mapping intended velocities to firing rates).
+    # First, get samples to put into linear regression (skip bins with no target).
+    regression_input_X = []
+    regression_input_Y = []
+    num_bins = min([binned_firing_rates.shape[0], binned_intended_velocities.shape[0]])
+    for bin_idx in range(num_bins):
+        bin_intended_velocity = binned_intended_velocities[bin_idx]
+        bin_firing_rate = binned_firing_rates[bin_idx]
+        # If there is no target during this bin, intended velocity will contain nan.
+        bin_is_valid = not np.isnan(np.sum(bin_intended_velocity))
+        if bin_is_valid:
+            regression_input_X.append(bin_intended_velocity)
+            regression_input_Y.append(bin_firing_rate)
+    regression_input_X = np.array(regression_input_X)
+    regression_input_Y = np.array(regression_input_Y)
+    # Run the regression to get the measurement matrix.
+    measurement_model = LinearRegression().fit(regression_input_X, regression_input_Y)
+    # Since we have a constant term in addition to x and y velocity, add on the
+    # intercept terms as the left column.
+    measurement_matrix = np.hstack(
+        (measurement_model.intercept_[:, np.newaxis], measurement_model.coef_)
+    )
+
+    # Initial state. 1 for the constant term, and 0 velocity.
+    kalman_model.x = np.array([1, 0, 0])
+
+    # Measurement function. Mapping from state to expected measurements. (192 x 3)
+    kalman_model.H = measurement_matrix
+
+    # State transition matrix. Map previous state to next state based on kinematics
+    # alone. We assume x and y are independent, and that they merely have a slight
+    # damping factor.
+    velocity_damping_factor = 0.9
+    kalman_model.F = np.array(
+        [
+            [1, 0, 0],
+            [0, velocity_damping_factor, 0],
+            [0, 0, velocity_damping_factor],
+        ]
+    )
+
+    # Estimate uncertainty matrix. Assume the only error is in the velocity (the
+    # constant term should always be 1), and the error in x and y do not covary.
+    kalman_model.P = np.array(
+        [
+            [0, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ]
+    )
+
+    # Measurement uncertainty. Not sure how to get the uncertainty/noise in
+    # measuring firing rates (typically measurement uncertainty comes from the
+    # manufacturer of a device, but besides not having that, that would refer to the
+    # voltages themselves, as opposed to the firing rates which are derived from
+    # them). For now, trying small random gaussian noise.
+    kalman_model.R = np.random.normal(scale=1, size=(192, 192))
+
+    return kalman_model
+
+
+def get_binned_predicted_velocities_kalman(binned_firing_rates, kalman_model):
+    """
+    Use a Kalman filter model to predict velocity vectors based on neural firing rates.
+
+    :param numpy.ndarray binned_firing_rates: Matrix with dimensions
+        (num_bins x num_channels)
+    :param filterpy.kalman.KalmanFilter kalman_model: Our Kalman filter model, with
+        parameters already fit and defined and everything. Important is that it has a
+        `predict` method, as well as an `update` method which takes in a vector of
+        firing rates for a single time bin. It should also expose the current state
+        estimate (a 2D velocity vector) as the property `x`.
+
+    :return numpy.ndarray binned_predicted_velocities: Matrix with dimensions
+        (num_bins x 2), holding the model's predicted x- and y- velocity at every time
+        step.
+    """
+    num_bins = binned_firing_rates.shape[0]
+
+    binned_predicted_velocities = np.empty((num_bins, 2))
+    binned_predicted_velocities.fill(np.nan)
+    # Feed in binned firing rates (measurements) one time step at a time, and
+    # see what the Kalman model predicts for that time step.
+    for bin_idx in range(num_bins):
+        if bin_idx % 10000 == 0:
+            print(f"predicted: {bin_idx}")
+
+        bin_firing_rates = binned_firing_rates[bin_idx]
+        kalman_model.predict()
+        kalman_model.update(bin_firing_rates)
+        estimated_state = kalman_model.x[1:]
+
+        binned_predicted_velocities[bin_idx] = estimated_state
+
+    return binned_predicted_velocities
