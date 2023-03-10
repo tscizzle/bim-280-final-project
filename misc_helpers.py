@@ -396,3 +396,51 @@ def get_binned_predicted_velocities_kalman(binned_firing_rates, kalman_model):
         binned_predicted_velocities[bin_idx] = estimated_state
 
     return binned_predicted_velocities
+
+
+class LinearDecoderWithSmoothing:
+    """
+    Implements a decoder obeying the equation
+
+        v_t = alpha * v_{t-1} + beta * M * z_t
+
+    The first term takes into account the previous velocity prediction (v_{t-1}).
+    The second term takes into account the new neural measurements (z_t).
+    The full equation takes both into account, weighted by alpha and beta.
+
+    This class maintains some state, because the prediction for the current time step
+    depends on the previous prediction (i.e. the first term, i.e. smoothing).
+    """
+
+    def __init__(self, alpha, beta, M):
+        """
+        :param float alpha: Weight of the previous predicted velocity for the next
+            predicted velocity.
+        :param float beta: Weight of the neurally-predicted velocity.
+        :param sklearn.linear_model.LinearRegression: Model
+        """
+        self.alpha = alpha
+        self.beta = beta
+        self.M = M
+        self.v_t = np.array([0, 0])
+
+    def predict(self, z_t):
+        """
+        Given the neural data at the current time step, and previous predicted
+            velocities, predict the velocity for the current time step.
+
+        :param np.ndarray z_t: Single-axis length-192 firing rate vector at the current
+            time step (for the 192 channels).
+
+        :param np.ndarray v_t: Predicted x- and y- velocity for the current time step.
+        """
+        # LinearRegression takes a list of samples, so reshape our 1-D input to be 2-D.
+        formatted_z_t = z_t.reshape(1, -1)
+
+        # Apply the linear equation with smoothing.
+        v_t = self.alpha * self.v_t + self.beta * self.M.predict(formatted_z_t)[0]
+
+        # Store the result for the future.
+        self.v_t = v_t
+
+        return v_t

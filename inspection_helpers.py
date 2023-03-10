@@ -91,6 +91,48 @@ def display_event_timeline(sorted_events):
         prev_time = t
 
 
+def plot_predicted_channel_firing_rates(firing_rate_model):
+    """
+    For each channel, show a plot of its predicted firing rate as a function of the
+    angle of the intended velocity vector. I.e. As the user attempts or performs
+    movements in each direction, what do we think each channel's firing rate will be?
+    These plots look like tuning curves (though they are predictions, not raw data).
+
+    :param sklearn.linear_model.LinearRegression firing_rate_model: sklearn's
+        `LinearRegression` class is probably what this should be. If using something
+        else, it should work if it has a `predict` method with the same signature as
+        that of `LinearRegression`, as well as a `coef_` property whose first axis has
+        length equal to the number of channels.
+    """
+
+    num_channels = firing_rate_model.coef_.shape[0]
+    for channel_idx in range(num_channels):
+        fig, ax = plt.subplots()
+
+        velocity_magnitude = 70
+        angles_to_test = np.arange(0, 2.25 * math.pi, math.pi / 4)
+        predictions = []
+        for theta in angles_to_test:
+            velocity_vector = (
+                np.array([math.cos(theta), math.sin(theta)]) * velocity_magnitude
+            )
+            channel_firing_rate = firing_rate_model.predict([velocity_vector])[
+                0, channel_idx
+            ]
+            predictions.append(channel_firing_rate)
+
+        ax.plot(angles_to_test, predictions)
+
+        ax.set_xlabel("angle (radians)")
+        ax.set_ylabel("firing rate (spikes / sec)")
+        ax.set_xticks(angles_to_test)
+        ax.xaxis.set_major_formatter(lambda angle, _: f"{round(angle / math.pi, 2)} π")
+        ax.set_ylim(0)
+        ax.set_title(f"Channel {channel_idx} firing rate by angle")
+
+        plt.show()
+
+
 def plot_trial_hand_trajectories(
     nwbfile,
     bin_size,
@@ -100,7 +142,8 @@ def plot_trial_hand_trajectories(
     show_plot=False,
 ):
     """
-    Create gifs of hand trajectories overlaid on the target configuration.
+    Create gifs of hand trajectories overlaid on the target configuration. Also put
+    things such as
 
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
     :param float bin_size: Length (in seconds) of each time bin.
@@ -133,8 +176,7 @@ def plot_trial_hand_trajectories(
         trial_go_cue_time = trial_go_cue_times[trial_idx]
         behavior_idxs = behavior_idxs_by_trial_idx[trial_idx]
         start_idx = behavior_idxs[0]
-        go_cue_idx = behavior_idxs[1]
-        stop_idx = behavior_idxs[2]
+        stop_idx = behavior_idxs[-1]
         trial_hand_positions = hand_positions.data[start_idx:stop_idx]
         trial_hand_x = trial_hand_positions[:, 0]
         trial_hand_y = trial_hand_positions[:, 1]
@@ -198,45 +240,3 @@ def plot_trial_hand_trajectories(
 
         if show_plot:
             plt.show()
-
-
-def plot_predicted_channel_firing_rates(firing_rate_model):
-    """
-    For each channel, show a plot of its predicted firing rate as a function of the
-    angle of the intended velocity vector. I.e. As the user attempts or performs
-    movements in each direction, what do we think each channel's firing rate will be?
-    These plots look like tuning curves (though they are predictions, not raw data).
-
-    :param sklearn.linear_model.LinearRegression firing_rate_model: sklearn's
-        `LinearRegression` class is probably what this should be. If using something
-        else, it should work if it has a `predict` method with the same signature as
-        that of `LinearRegression`, as well as a `coef_` property whose first axis has
-        length equal to the number of channels.
-    """
-
-    num_channels = firing_rate_model.coef_.shape[0]
-    for channel_idx in range(num_channels):
-        fig, ax = plt.subplots()
-
-        velocity_magnitude = 70
-        angles_to_test = np.arange(0, 2.25 * math.pi, math.pi / 4)
-        predictions = []
-        for theta in angles_to_test:
-            velocity_vector = (
-                np.array([math.cos(theta), math.sin(theta)]) * velocity_magnitude
-            )
-            channel_firing_rate = firing_rate_model.predict([velocity_vector])[
-                0, channel_idx
-            ]
-            predictions.append(channel_firing_rate)
-
-        ax.plot(angles_to_test, predictions)
-
-        ax.set_xlabel("angle (radians)")
-        ax.set_ylabel("firing rate (spikes / sec)")
-        ax.set_xticks(angles_to_test)
-        ax.xaxis.set_major_formatter(lambda angle, _: f"{round(angle / math.pi, 2)} π")
-        ax.set_ylim(0)
-        ax.set_title(f"Channel {channel_idx} firing rate by angle")
-
-        plt.show()
