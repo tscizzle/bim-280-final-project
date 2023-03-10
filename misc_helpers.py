@@ -9,6 +9,9 @@ from sklearn.linear_model import LinearRegression
 from filterpy.kalman import KalmanFilter
 
 
+## Constants.
+
+
 CACHE_DIR = "cache"
 
 
@@ -164,13 +167,15 @@ def get_binned_intended_velocities(nwbfile, bin_size):
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
     :param float bin_size: Length (in seconds) of each time bin.
 
-    :return numpy.ndarray binned_intended_velocities: Matrix with dimensions (num_bins x 2)
+    :return numpy.ndarray binned_intended_velocities: Matrix with dimensions
+        (num_bins x 2)
     """
     hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
     hand_position_timestamps = hand_positions.timestamps
     hand_position_vectors = hand_positions.data
     trial_target_positions = nwbfile.trials["target_pos"]
     trial_go_cue_times = nwbfile.trials["go_cue_time"]
+    trial_target_acquire_times = nwbfile.trials["target_acquire_time"]
     trial_stop_times = nwbfile.trials["stop_time"]
 
     latest_trial_stop = trial_stop_times[-1]
@@ -211,9 +216,17 @@ def get_binned_intended_velocities(nwbfile, bin_size):
         ):
             cur_trial_idx += 1
         trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
+        trial_target_acquire_time = trial_target_acquire_times[cur_trial_idx][0]
         trial_stop_time = trial_stop_times[cur_trial_idx]
-        # Only consider the target active if we are between a go cue and the trial stop.
-        if trial_go_cue_time < bin_midpoint < trial_stop_time:
+        trial_target_end_time = (
+            trial_target_acquire_time
+            if not np.isnan(trial_target_acquire_time)
+            and trial_target_acquire_time < trial_stop_time
+            else trial_stop_time
+        )
+        # Only consider the target active if we are between a go cue and the first
+        # acquisition of the target (i.e. ignoring the dwell phase / attempts).
+        if trial_go_cue_time < bin_midpoint < trial_target_end_time:
             bin_target_position = trial_target_positions[cur_trial_idx]
 
         if bin_target_position is not None:
@@ -247,11 +260,13 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
     behavior_idxs_by_trial_idx.fill(np.nan)
     start_idx_col = 0
     go_cue_idx_col = 1
-    stop_idx_col = 2
+    target_acquire_idx_col = 2
+    stop_idx_col = 3
 
-    # Loop through trials and behavior stream in parallel, accruing the mapping from
-    # trial start times to indices of the behavior stream.
+    # Loop through trials and behavior stream in parallel, accruing the array of trial
+    # rows, where each row has important indices of the behavior stream.
     trial_go_cue_times = nwbfile.trials["go_cue_time"]
+    trial_target_acquire_times = nwbfile.trials["target_acquire_time"]
     trial_stop_times = nwbfile.trials["stop_time"]
     hand_positions = nwbfile.processing["behavior"]["Position"]["Hand"]
     behavior_timestamps = hand_positions.timestamps
@@ -260,6 +275,7 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
     for trial_idx in range(num_trials):
         trial_start_time = trial_start_times[trial_idx]
         trial_go_cue_time = trial_go_cue_times[trial_idx]
+        trial_target_acquire_time = trial_target_acquire_times[trial_idx]
         trial_stop_time = trial_stop_times[trial_idx]
         start_idx = None
         go_cue_idx = None
@@ -271,6 +287,8 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
                 start_idx = cur_behavior_idx
             elif behavior_timestamp == trial_go_cue_time:
                 go_cue_idx = cur_behavior_idx
+            elif behavior_timestamp == trial_target_acquire_time[0]:
+                target_acquire_idx = cur_behavior_idx
             elif behavior_timestamp == trial_stop_time:
                 stop_idx = cur_behavior_idx
 
@@ -284,6 +302,10 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
         behavior_idxs_by_trial_idx[trial_idx][start_idx_col] = start_idx
         if go_cue_idx is not None:
             behavior_idxs_by_trial_idx[trial_idx][go_cue_idx_col] = go_cue_idx
+        if target_acquire_idx is not None:
+            behavior_idxs_by_trial_idx[trial_idx][
+                target_acquire_idx_col
+            ] = target_acquire_idx
         behavior_idxs_by_trial_idx[trial_idx][stop_idx_col] = stop_idx
 
     return behavior_idxs_by_trial_idx
@@ -406,41 +428,68 @@ class LinearDecoderWithSmoothing:
 
     The first term takes into account the previous velocity prediction (v_{t-1}).
     The second term takes into account the new neural measurements (z_t).
-    The full equation takes both into account, weighted by alpha and beta.
+    The full equation takes both of those into account, weighted by alpha and beta.
 
     This class maintains some state, because the prediction for the current time step
-    depends on the previous prediction (i.e. the first term, i.e. smoothing).
+    depends on the previous prediction and possibly previous neural measurements.
     """
 
-    def __init__(self, alpha, beta, M):
+    def __init__(self, alpha, beta, M, delta_t, neural_time_lag):
         """
         :param float alpha: Weight of the previous predicted velocity for the next
             predicted velocity.
         :param float beta: Weight of the neurally-predicted velocity.
-        :param sklearn.linear_model.LinearRegression: Model
+        :param sklearn.linear_model.LinearRegression M: Model with `predict` method
+            which takes in a vector of firing rates and outputs a velocity vector.
+        :param float delta_t: Length (in seconds) between each prediction.
+        :param float neural_time_lag: Length (in seconds) we are assuming the lag is
+            between neural firing and intended velocity. We fit the linear mapping from
+            firing rates to velocities based with this time lag in mind, so we should
+            use the same lag in this model's predictions.
         """
         self.alpha = alpha
         self.beta = beta
         self.M = M
-        self.v_t = np.array([0, 0])
+        self.delta_t = delta_t
+        self.neural_time_lag = neural_time_lag
+        self.neural_bin_lag = int(neural_time_lag / delta_t)
 
-    def predict(self, z_t):
+        self.predicted_velocities = []
+        self.measured_firing_rates = []
+
+    def predict(self, firing_rate_vector):
         """
         Given the neural data at the current time step, and previous predicted
             velocities, predict the velocity for the current time step.
 
-        :param np.ndarray z_t: Single-axis length-192 firing rate vector at the current
-            time step (for the 192 channels).
+        :param np.ndarray firing_rate_vector: Single-axis length-192 firing rate vector
+            at the current time step (for the 192 channels).
 
         :param np.ndarray v_t: Predicted x- and y- velocity for the current time step.
         """
-        # LinearRegression takes a list of samples, so reshape our 1-D input to be 2-D.
-        formatted_z_t = z_t.reshape(1, -1)
+        # Store the measured firing rate vector.
+        self.measured_firing_rates.append(firing_rate_vector)
 
-        # Apply the linear equation with smoothing.
-        v_t = self.alpha * self.v_t + self.beta * self.M.predict(formatted_z_t)[0]
+        # Assuming there is enough history (1 prediction), get the previous prediction.
+        prev_velocity = (
+            self.predicted_velocities[-1]
+            if len(self.predicted_velocities) > 0
+            else np.zeros(2)
+        )
+        # Assuming there is enough history (a few measurements), get the predicted
+        # velocity from the neural activity a few measurements ago (according to the
+        # specified time lag).
+        lagged_firing_rate_vector = (
+            self.measured_firing_rates[-1 - self.neural_bin_lag]
+            if len(self.measured_firing_rates) > self.neural_bin_lag
+            else np.zeros(192)
+        )
+        neural_velocity = self.M.predict(lagged_firing_rate_vector.reshape(1, -1))[0]
+
+        # Apply the equation (simple linear mapping, with smoothing).
+        predicted_velocity = self.alpha * prev_velocity + self.beta * neural_velocity
 
         # Store the result for the future.
-        self.v_t = v_t
+        self.predicted_velocities.append(predicted_velocity)
 
-        return v_t
+        return predicted_velocity

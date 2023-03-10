@@ -1,10 +1,12 @@
 import time
+import os
 import math
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib import patches
+from matplotlib.collections import PatchCollection
+from matplotlib.patches import Circle
 
 
 from misc_helpers import (
@@ -12,6 +14,12 @@ from misc_helpers import (
     display_secs_as_time,
     get_behavior_idxs_by_trial_idx,
 )
+
+
+## Constants.
+
+
+REPORTING_DIR = "reporting"
 
 
 def plot_session_log(nwbfile):
@@ -165,7 +173,7 @@ def plot_trial_hand_trajectories(
     )
 
     unique_target_points = set((x, y) for x, y, _ in nwbfile.trials["target_pos"])
-    all_target_x_vals, all_target_y_vals = zip(*unique_target_points)
+    target_radius = nwbfile.trials["target_size"][0][0] / 2
 
     trial_target_positions = nwbfile.trials["target_pos"]
     trial_start_times = nwbfile.trials["start_time"]
@@ -182,13 +190,22 @@ def plot_trial_hand_trajectories(
         trial_hand_y = trial_hand_positions[:, 1]
 
         # Make an animation of the trial.
+
         fig, ax = plt.subplots(figsize=(10, 10))
-        ax.scatter(all_target_x_vals, all_target_y_vals, color="gray")
-        cued_target = ax.scatter(
-            [trial_target_pos[0]], [trial_target_pos[1]], color="red", s=80
+
+        target_circles = [
+            Circle((x, y), radius=target_radius, linewidth=0, color="gray")
+            for x, y in unique_target_points
+        ]
+        target_collection = PatchCollection(target_circles)
+        ax.add_collection(target_collection)
+        cued_target = Circle(
+            trial_target_pos, radius=target_radius, linewidth=0, color="red"
         )
+        ax.add_patch(cued_target)
         (hand_trajectory,) = ax.plot([], [], color="blue")
         (predicted_velocity_line,) = ax.plot([], [], color="red")
+
         ax.set_xlim([-200, 200])
         ax.set_ylim([-200, 200])
         ax.set_aspect("equal", adjustable="box")
@@ -196,6 +213,7 @@ def plot_trial_hand_trajectories(
         trial_num_ms = stop_idx - start_idx
         ms_per_frame = 50
         anim_num_frames = math.floor(trial_num_ms / ms_per_frame)
+        anim_interval = ms_per_frame * slow_factor
 
         def init_func():
             hand_trajectory.set_data([], [])
@@ -232,11 +250,15 @@ def plot_trial_hand_trajectories(
             animate,
             init_func=init_func,
             frames=anim_num_frames,
-            interval=ms_per_frame * slow_factor,
+            interval=anim_interval,
         )
-
-        fps = 1000 / ms_per_frame
-        anim.save(f"trial_{trial_idx}_trajectory.gif", writer="pillow", fps=fps)
 
         if show_plot:
             plt.show()
+        else:
+            fps = 1000 / anim_interval
+            anim_filename = f"trial_{trial_idx}_trajectory.gif"
+            anim_filepath = os.path.join(REPORTING_DIR, anim_filename)
+            anim.save(anim_filepath, writer="pillow", fps=fps)
+
+        plt.close()

@@ -3,6 +3,7 @@ NOTES.txt
 TODO.txt
 data/
 cache/
+reporting/
 
 # Typical Python gitignore, from https://github.com/github/gitignore/blob/main/Python.gitignore
 
