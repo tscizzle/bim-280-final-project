@@ -245,7 +245,8 @@ def plot_trial_hand_trajectories(
 ):
     """
     Create gifs of hand trajectories overlaid on the target configuration. Also put
-    things such as
+    things such as predicted direction vectors, and color the cued target to indicate
+    go phase, acquired phase, etc.
 
     :param NWBFile nwbfile: An NWBFile, as returned by `NWBHDF5IO.read`.
     :param float bin_size: Length (in seconds) of each time bin.
@@ -300,8 +301,8 @@ def plot_trial_hand_trajectories(
         )
         ax.add_patch(cued_target)
         (hand_trajectory,) = ax.plot([], [], color="blue", label="hand trajectory")
-        (predicted_velocity_line,) = ax.plot(
-            [], [], color="red", label="predicted velocity"
+        (predicted_direction_line,) = ax.plot(
+            [], [], color="red", label="predicted direction"
         )
 
         ax.set_xlim([-200, 200])
@@ -317,7 +318,7 @@ def plot_trial_hand_trajectories(
 
         def init_func():
             hand_trajectory.set_data([], [])
-            predicted_velocity_line.set_data([], [])
+            predicted_direction_line.set_data([], [])
             cued_target.set_color("red")
 
         def animate(frame):
@@ -335,18 +336,27 @@ def plot_trial_hand_trajectories(
             if overall_time >= trial_target_acquire_time:
                 cued_target.set(color="purple")
 
-            if predicted_velocities is not None:
+            if predicted_velocities is not None and (
+                trial_go_cue_time <= overall_time <= trial_target_acquire_time
+            ):
                 bin_idx = math.floor(overall_time / bin_size)
                 predicted_velocity = predicted_velocities[bin_idx]
+                predicted_direction = np.zeros(2)
+                if predicted_velocity.any():
+                    predicted_direction = (
+                        predicted_velocity / np.linalg.norm(predicted_velocity)
+                    ) * 20
                 start_point = np.array(
                     [trial_hand_x[num_ms_so_far], trial_hand_y[num_ms_so_far]]
                 )
-                end_point = start_point + predicted_velocity
-                predicted_velocity_points = np.array([start_point, end_point])
-                predicted_velocity_line.set_data(
-                    predicted_velocity_points[:, 0],
-                    predicted_velocity_points[:, 1],
+                end_point = start_point + predicted_direction
+                predicted_direction_points = np.array([start_point, end_point])
+                predicted_direction_line.set_data(
+                    predicted_direction_points[:, 0],
+                    predicted_direction_points[:, 1],
                 )
+            else:
+                predicted_direction_line.set_data([], [])
 
         anim = FuncAnimation(
             fig,

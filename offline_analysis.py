@@ -191,8 +191,8 @@ def main():
             prediction_time = prediction_end - prediction_start
             prediction_time_per_sample = prediction_time / len(predicted_velocities)
             print(
-                f"Predicted {len(predicted_velocities)} samples in {prediction_time} seconds "
-                f"({prediction_time_per_sample} seconds per sample)."
+                f"Predicted {len(predicted_velocities)} samples in {prediction_time} "
+                f"seconds ({prediction_time_per_sample} seconds per sample)."
             )
 
             print(f"predicted_velocities.shape: {predicted_velocities.shape}")
@@ -212,16 +212,25 @@ def main():
             # Plot the angle error distribution.
             plot_prediction_angle_errors(relative_angles, subset_name)
 
-        # ## Visualize trial trajectory and predicted velocities.
+            ## Visualize trial trajectory and predicted velocities.
 
-        # plot_trial_hand_trajectories(
-        #     nwbfile,
-        #     BIN_SIZE,
-        #     trial_idxs=range(160, 200),
-        #     predicted_velocities=binned_predicted_velocities,
-        #     slow_factor=10,
-        #     # show_plot=True,
-        # )
+            if subset_name == "test":
+                full_length_predicted_velocities = np.zeros((num_bins_total, 2))
+                full_length_predicted_velocities[subset_bins] = predicted_velocities
+                plot_trial_hand_trajectories(
+                    nwbfile,
+                    BIN_SIZE,
+                    trial_idxs=[
+                        4007,
+                        4019,
+                        4021,
+                        4031,
+                        4038,
+                    ],
+                    predicted_velocities=full_length_predicted_velocities,
+                    slow_factor=10,
+                    # show_plot=True,
+                )
 
 
 if __name__ == "__main__":
