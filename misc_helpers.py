@@ -15,6 +15,23 @@ from filterpy.kalman import KalmanFilter
 CACHE_DIR = "cache"
 
 
+def cache_result(cache_filename, result):
+    """
+    Save a numpy object to a cache file in our cache directory.
+
+    :param str cache_filename: E.g. Name of the cache file to load from or save to,
+        preferably with the .npy file extension to make it clear what it is, e.g.
+        "binned_firing_rates.npy"
+    :param numpy.ndarray result: Really anything that `numpy.save` can handle.
+    """
+    cache_filepath = os.path.join(CACHE_DIR, cache_filename)
+
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    with open(cache_filepath, "wb") as f:
+        np.save(f, result, allow_pickle=True)
+
+
 def cached_func(cache_filename, func):
     """
     Run a function which generates a numpy serializable object. However, first check if
@@ -37,18 +54,15 @@ def cached_func(cache_filename, func):
     # If cache file exists, just load from that.
     if os.path.exists(cache_filepath):
         with open(cache_filepath, "rb") as f:
-            result = np.load(f)
-            print(f"\nLoaded {cache_filename} from cache.\n")
+            result = np.load(f, allow_pickle=True)
+            print(f"Loaded {cache_filename} from cache.")
     else:
         # Otherwise, calculate the binned intended velocities.
-        print(f"\nCalculating {cache_filename}...\n")
+        print(f"Calculating {cache_filename}...")
         result = func()
         # And cache them for future runs.
-        if not os.path.exists(CACHE_DIR):
-            os.makedirs(CACHE_DIR)
-        with open(cache_filepath, "wb") as f:
-            np.save(f, result)
-        print(f"Calculated {cache_filename}.")
+        cache_result(cache_filename, result)
+        print(f"Calculated and saved {cache_filename}.")
 
     return result
 
@@ -216,7 +230,7 @@ def get_binned_intended_velocities(nwbfile, bin_size):
         ):
             cur_trial_idx += 1
         trial_go_cue_time = trial_go_cue_times[cur_trial_idx]
-        trial_target_acquire_time = trial_target_acquire_times[cur_trial_idx][0]
+        trial_target_acquire_time = trial_target_acquire_times[cur_trial_idx][-1]
         trial_stop_time = trial_stop_times[cur_trial_idx]
         trial_target_end_time = (
             trial_target_acquire_time
@@ -224,8 +238,8 @@ def get_binned_intended_velocities(nwbfile, bin_size):
             and trial_target_acquire_time < trial_stop_time
             else trial_stop_time
         )
-        # Only consider the target active if we are between a go cue and the first
-        # acquisition of the target (i.e. ignoring the dwell phase / attempts).
+        # Only consider the target active if we are between a go cue and the last
+        # acquisition of the target (i.e. ignoring the dwell phase).
         if trial_go_cue_time < bin_midpoint < trial_target_end_time:
             bin_target_position = trial_target_positions[cur_trial_idx]
 
@@ -256,12 +270,8 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
     trial_start_times = nwbfile.trials["start_time"]
     num_trials = len(trial_start_times)
 
-    behavior_idxs_by_trial_idx = np.empty((num_trials, 3), dtype=int)
+    behavior_idxs_by_trial_idx = np.empty((num_trials,), dtype=object)
     behavior_idxs_by_trial_idx.fill(np.nan)
-    start_idx_col = 0
-    go_cue_idx_col = 1
-    target_acquire_idx_col = 2
-    stop_idx_col = 3
 
     # Loop through trials and behavior stream in parallel, accruing the array of trial
     # rows, where each row has important indices of the behavior stream.
@@ -279,6 +289,7 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
         trial_stop_time = trial_stop_times[trial_idx]
         start_idx = None
         go_cue_idx = None
+        target_acquire_idx = None
         stop_idx = None
 
         while cur_behavior_idx < num_behavior_idxs:
@@ -287,7 +298,7 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
                 start_idx = cur_behavior_idx
             elif behavior_timestamp == trial_go_cue_time:
                 go_cue_idx = cur_behavior_idx
-            elif behavior_timestamp == trial_target_acquire_time[0]:
+            elif behavior_timestamp == trial_target_acquire_time[-1]:
                 target_acquire_idx = cur_behavior_idx
             elif behavior_timestamp == trial_stop_time:
                 stop_idx = cur_behavior_idx
@@ -298,15 +309,14 @@ def get_behavior_idxs_by_trial_idx(nwbfile):
                 break
 
         # Take the important timestamps for this trial, and store their behavior indices
-        # in the row for this trial (each in the specified column).
-        behavior_idxs_by_trial_idx[trial_idx][start_idx_col] = start_idx
-        if go_cue_idx is not None:
-            behavior_idxs_by_trial_idx[trial_idx][go_cue_idx_col] = go_cue_idx
-        if target_acquire_idx is not None:
-            behavior_idxs_by_trial_idx[trial_idx][
-                target_acquire_idx_col
-            ] = target_acquire_idx
-        behavior_idxs_by_trial_idx[trial_idx][stop_idx_col] = stop_idx
+        # in the row for this trial.
+        behavior_idxs_dict = {
+            "start_idx": start_idx,
+            "go_cue_idx": go_cue_idx,
+            "target_acquire_idx": target_acquire_idx,
+            "stop_idx": stop_idx,
+        }
+        behavior_idxs_by_trial_idx[trial_idx] = behavior_idxs_dict
 
     return behavior_idxs_by_trial_idx
 
@@ -418,6 +428,41 @@ def get_binned_predicted_velocities_kalman(binned_firing_rates, kalman_model):
         binned_predicted_velocities[bin_idx] = estimated_state
 
     return binned_predicted_velocities
+
+
+def get_signed_angle_between(true_vector, other_vector):
+    """
+    For two 2D vectors, get the angle between them, but take the direction into account.
+    In other words, if you would need to rotate true_vector counter-clockwise to line up
+    with other_vector, then return a positive number (between 0 and pi). If clockwise,
+    then return a negative number (between 0 and -pi).
+
+    :param numpy.ndarray true_vector: Length 2 vector (x and y), relative to which
+        another vector's angle will be determined.
+    :param numpy.ndarray other_vector: Length 2 vector (x and y), a vector to determine
+        its angle, relative to true_vector.
+
+    :return float relative_other_angle: Radians. Between -pi and pi. Angle you would
+        have to rotate true_vector to align it with other_vector.
+    """
+    # If either vector has nan, return nan.
+    if np.isnan(true_vector).any() or np.isnan(other_vector).any():
+        return np.nan
+
+    # Get each vector direction as an angle between -pi and pi.
+    true_angle = math.atan2(true_vector[1], true_vector[0])
+    other_angle = math.atan2(other_vector[1], other_vector[0])
+
+    # Imagine rotating the picture to make true_vector pointing straight right (an angle
+    # of 0).
+    relative_other_angle = other_angle - true_angle
+
+    if relative_other_angle > math.pi:
+        relative_other_angle -= 2 * math.pi
+    elif relative_other_angle <= -math.pi:
+        relative_other_angle += 2 * math.pi
+
+    return relative_other_angle
 
 
 class LinearDecoderWithSmoothing:

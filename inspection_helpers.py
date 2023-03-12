@@ -141,6 +141,100 @@ def plot_predicted_channel_firing_rates(firing_rate_model):
         plt.show()
 
 
+def plot_prediction_angle_errors(relative_angles, data_subset_name):
+    """
+    Create a plot of angle errors of predicted velocities.
+
+    :param np.ndarray relative_angles: Angles (in radians, between -pi and pi) between
+        every predicted velocity and the true velocity (direction of the target from the
+        current hand position) at that time step.
+    :param str data_subset_name: Name of the subset of data this is for, for titling the
+        plot. E.g. "train" or "test".
+    """
+
+    # Get the absolute value of angle differences (to get "how far off" all predictions
+    # are).
+    angle_errors = np.abs(relative_angles)
+
+    # Calculate summary stats.
+    relative_angle_mean = np.mean(relative_angles)
+    relative_angle_stddev = np.std(relative_angles)
+    angle_error_mean = np.mean(angle_errors)
+    angle_error_stddev = np.std(angle_errors)
+
+    # Create a plot of absolute angle error.
+
+    fig, ax = plt.subplots()
+
+    angle_error_hist_vals, _, _ = ax.hist(
+        angle_errors, bins=np.array(range(17)) * math.pi / 16
+    )
+    ax.set_xticks(
+        np.array(range(5)) * math.pi / 4,
+        [0, "$\pi/4$", "$\pi/2$", "$3\pi/4$", "$\pi$"],
+    )
+    ax.axvline(angle_error_mean, color="lightcoral", linestyle="--")
+    ax.text(
+        angle_error_mean + 0.05,
+        max(angle_error_hist_vals) / 2,
+        f"avg  {round(angle_error_mean, 2)}",
+        fontsize=8,
+        rotation=90,
+    )
+    ax.set_xlabel("absolute angle difference (radians)", labelpad=15)
+    ax.set_ylabel("# predictions (single time bins)", labelpad=15)
+    ax.set_title(
+        f"Absolute angle difference between\npredicted velocity and intended velocity",
+        pad=15,
+    )
+
+    plt.tight_layout()
+
+    # Save the plot image.
+    angle_error_plot_filename = f"angle_errors_{data_subset_name}.png"
+    angle_error_plot_filepath = os.path.join(REPORTING_DIR, angle_error_plot_filename)
+    plt.savefig(angle_error_plot_filepath)
+
+    plt.close()
+
+    # Create a plot of relative angle (not absolute value. includes direction of error.)
+
+    fig, ax = plt.subplots()
+
+    ax.hist(relative_angles, bins=np.array(range(-16, 17)) * math.pi / 16)
+    ax.set_xticks(
+        np.array(range(-4, 5)) * math.pi / 4,
+        [
+            "$-\pi$",
+            "$-3\pi/4$",
+            "$-\pi/2$",
+            "$-\pi/4$",
+            0,
+            "$\pi/4$",
+            "$\pi/2$",
+            "$3\pi/4$",
+            "$\pi$",
+        ],
+    )
+    ax.set_xlabel("angle difference (radians)", labelpad=15)
+    ax.set_ylabel("# predictions (single time bins)", labelpad=15)
+    ax.set_title(
+        f"Angle difference between\npredicted velocity and intended velocity",
+        pad=15,
+    )
+
+    plt.tight_layout()
+
+    # Save the plot image.
+    relative_angle_plot_filename = f"relative_angles_{data_subset_name}.png"
+    relative_angle_plot_filepath = os.path.join(
+        REPORTING_DIR, relative_angle_plot_filename
+    )
+    plt.savefig(relative_angle_plot_filepath)
+
+    plt.close()
+
+
 def plot_trial_hand_trajectories(
     nwbfile,
     bin_size,
@@ -178,13 +272,15 @@ def plot_trial_hand_trajectories(
     trial_target_positions = nwbfile.trials["target_pos"]
     trial_start_times = nwbfile.trials["start_time"]
     trial_go_cue_times = nwbfile.trials["go_cue_time"]
+    trial_target_acquire_times = nwbfile.trials["target_acquire_time"]
     for trial_idx in trial_idxs:
         trial_target_pos = trial_target_positions[trial_idx]
         trial_start_time = trial_start_times[trial_idx]
         trial_go_cue_time = trial_go_cue_times[trial_idx]
+        trial_target_acquire_time = trial_target_acquire_times[trial_idx][-1]
         behavior_idxs = behavior_idxs_by_trial_idx[trial_idx]
-        start_idx = behavior_idxs[0]
-        stop_idx = behavior_idxs[-1]
+        start_idx = behavior_idxs["start_idx"]
+        stop_idx = behavior_idxs["stop_idx"]
         trial_hand_positions = hand_positions.data[start_idx:stop_idx]
         trial_hand_x = trial_hand_positions[:, 0]
         trial_hand_y = trial_hand_positions[:, 1]
@@ -203,12 +299,16 @@ def plot_trial_hand_trajectories(
             trial_target_pos, radius=target_radius, linewidth=0, color="red"
         )
         ax.add_patch(cued_target)
-        (hand_trajectory,) = ax.plot([], [], color="blue")
-        (predicted_velocity_line,) = ax.plot([], [], color="red")
+        (hand_trajectory,) = ax.plot([], [], color="blue", label="hand trajectory")
+        (predicted_velocity_line,) = ax.plot(
+            [], [], color="red", label="predicted velocity"
+        )
 
         ax.set_xlim([-200, 200])
         ax.set_ylim([-200, 200])
         ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"Trial {trial_idx}")
+        ax.legend()
 
         trial_num_ms = stop_idx - start_idx
         ms_per_frame = 50
@@ -232,6 +332,9 @@ def plot_trial_hand_trajectories(
             if overall_time >= trial_go_cue_time:
                 cued_target.set(color="green")
 
+            if overall_time >= trial_target_acquire_time:
+                cued_target.set(color="purple")
+
             if predicted_velocities is not None:
                 bin_idx = math.floor(overall_time / bin_size)
                 predicted_velocity = predicted_velocities[bin_idx]
@@ -254,11 +357,13 @@ def plot_trial_hand_trajectories(
         )
 
         if show_plot:
+            print(f"Showing animation for trial {trial_idx}.")
             plt.show()
         else:
             fps = 1000 / anim_interval
             anim_filename = f"trial_{trial_idx}_trajectory.gif"
             anim_filepath = os.path.join(REPORTING_DIR, anim_filename)
             anim.save(anim_filepath, writer="pillow", fps=fps)
+            print(f"Saved animation for trial {trial_idx}.")
 
         plt.close()
