@@ -141,7 +141,8 @@ def main():
                 regression_input_Y.append(bin_intended_velocity)
         regression_input_X = np.array(regression_input_X)
         regression_input_Y = np.array(regression_input_Y)
-        # Run the regression to get the preferred directions matrix.
+        # Run the regression (essentially, gets the preferred directions matrix, with an
+        # offset term).
         M = LinearRegression().fit(regression_input_X, regression_input_Y)
 
         train_end = time.time()
