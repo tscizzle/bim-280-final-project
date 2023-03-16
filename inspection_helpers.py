@@ -15,6 +15,8 @@ from misc_helpers import (
     get_behavior_idxs_by_trial_idx,
 )
 
+plt.rcParams.update({"font.size": 16})
+
 
 ## Constants.
 
@@ -178,7 +180,6 @@ def plot_prediction_angle_errors(relative_angles, data_subset_name):
         angle_error_mean + 0.05,
         max(angle_error_hist_vals) / 2,
         f"avg  {round(angle_error_mean, 2)}",
-        fontsize=8,
         rotation=90,
     )
     ax.set_xlabel("absolute angle difference (radians)", labelpad=15)
