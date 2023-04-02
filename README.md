@@ -1,4 +1,4 @@
-# 2D velocity-based Kalman filter decoding
+# 2D velocity-based linear decoding
 
 ## Setup
 
